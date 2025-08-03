@@ -9,6 +9,9 @@ const serviceAccount = JSON.parse(
   Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT as string, 'base64').toString('utf-8')
 );
 
+console.log("BOP_PL URL from env:", process.env.DATA_URL_BOP_PL);
+console.log("Requested source:", source);
+
 export async function GET(req: NextRequest) {
   const urlParam = req.nextUrl.searchParams.get('source') || 'BOP_PL';
   const dataUrl = process.env[`DATA_URL_${urlParam}`];
