@@ -1,74 +1,58 @@
-import { google } from 'googleapis';
 import { NextRequest, NextResponse } from 'next/server';
-import fetch from 'node-fetch';
-import { parse } from 'csv-parse';
-import { Readable } from 'stream';
-
-// Load credentials from environment variable
-const serviceAccount = JSON.parse(
-  Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT as string, 'base64').toString('utf-8')
-);
-
-console.log("BOP_PL URL from env:", process.env.DATA_URL_BOP_PL);
-console.log("Requested source:", source);
+import https from 'https';
+import csvParser from 'csv-parser';
 
 export async function GET(req: NextRequest) {
-  const urlParam = req.nextUrl.searchParams.get('source') || 'BOP_PL';
-  const dataUrl = process.env[`DATA_URL_${urlParam}`];
+  const source = req.nextUrl.searchParams.get('source') || 'BOP_PL';
 
-  console.log('🔗 Using CSV URL:', dataUrl);
+  console.log("🔍 Requested source:", source);
 
-  if (!dataUrl) {
-    return NextResponse.json({ success: false, error: 'Missing data URL for this source' });
+  const csvUrl = process.env[`DATA_URL_${source}`];
+
+  console.log("🌐 Resolved CSV URL:", csvUrl);
+
+  if (!csvUrl) {
+    return NextResponse.json({ success: false, error: "Missing data URL for this source" });
   }
 
   try {
-    const res = await fetch(dataUrl);
-    if (!res.ok) {
-      throw new Error(`Request failed. Status Code: ${res.status}`);
-    }
+    const csvData: any[] = await fetchCsvFromUrl(csvUrl);
 
-    const loans: any[] = [];
+    console.log("📊 Total rows fetched:", csvData.length);
 
-    const stream = res.body as Readable;
-    await new Promise<void>((resolve, reject) => {
-      stream
-        .pipe(parse({ columns: true, skip_empty_lines: true }))
-        .on('data', (row) => {
-          if (
-            row['event_name'] === 'loan_disbursed' &&
-            row['event_time']?.startsWith('2025-08-03') // <-- replace with dynamic week range later
-          ) {
-            loans.push(row);
-          }
-        })
-        .on('end', resolve)
-        .on('error', reject);
-    });
+    const loanCompleted = csvData.filter(row => row['MoEngage_User_Event_Loan Completed'] === '1').length;
+    const loanRejected = csvData.filter(row => row['MoEngage_User_Event_Loan Rejected'] === '1').length;
+    const totalUsers = new Set(csvData.map(row => row['User ID'])).size;
 
-    const loansDisbursedThisWeek = loans.length;
+    const metrics = {
+      totalUsers,
+      loanCompleted,
+      loanRejected,
+      conversionRate: totalUsers > 0 ? (loanCompleted / totalUsers) * 100 : 0,
+    };
 
-    // Auth with Google Sheets API
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
-
-    // Append to the sheet
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.SHEET_ID,
-      range: 'Sheet1!A:B',
-      valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: {
-        values: [[new Date().toISOString(), loansDisbursedThisWeek]],
-      },
-    });
-
-    return NextResponse.json({ success: true, count: loansDisbursedThisWeek });
-  } catch (err: any) {
-    console.error(err);
-    return NextResponse.json({ success: false, error: err.message });
+    return NextResponse.json({ success: true, metrics });
+  } catch (error: any) {
+    console.error("❌ Failed to process CSV:", error);
+    return NextResponse.json({ success: false, error: error.message });
   }
+}
+
+// Utility to fetch and parse CSV from a URL
+function fetchCsvFromUrl(url: string): Promise<any[]> {
+  return new Promise((resolve, reject) => {
+    const results: any[] = [];
+
+    https.get(url, response => {
+      if (response.statusCode !== 200) {
+        return reject(new Error(`Failed to fetch CSV. Status: ${response.statusCode}`));
+      }
+
+      response
+        .pipe(csvParser())
+        .on('data', data => results.push(data))
+        .on('end', () => resolve(results))
+        .on('error', reject);
+    }).on('error', reject);
+  });
 }
